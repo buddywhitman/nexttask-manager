@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api, type User, type Task, type Stage } from './api';
 import { KanbanBoard } from './components/KanbanBoard';
+import { ConfirmModal } from './components/ConfirmModal';
 import { 
   Lock, 
   Mail, 
@@ -10,7 +11,8 @@ import {
   X, 
   AlertCircle, 
   CheckCircle,
-  Kanban
+  Kanban,
+  WifiOff
 } from 'lucide-react';
 
 export default function App() {
@@ -27,6 +29,8 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [isOnline, setIsOnline] = useState<boolean>(window.navigator.onLine);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   // Modal control
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
@@ -61,6 +65,49 @@ export default function App() {
       .finally(() => setIsLoading(false));
   }, []);
 
+  // Alert Auto-Dismissal Timer
+  useEffect(() => {
+    if (success) {
+      const timer = setTimeout(() => {
+        setSuccess(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [success]);
+
+  // Alert Error Auto-Dismissal Timer
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        setError(null);
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+  }, [error]);
+
+  // Online / Offline Status Detection
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      setSuccess('Connection restored. Back online.');
+      setError(null);
+      if (user) fetchTasks();
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setError('You are offline. Board updates will fail until connection is restored.');
+      setSuccess(null);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [user, fetchTasks]);
+
   const handleLogout = () => {
     localStorage.removeItem('task_manager_token');
     setTokenState(null);
@@ -79,16 +126,19 @@ export default function App() {
         localStorage.setItem('task_manager_token', data.token);
         setTokenState(data.token);
         setUser(data.user);
+        setError(null);
         setSuccess('Registration successful!');
       } else {
         const data = await api.login(authEmail, authPassword);
         localStorage.setItem('task_manager_token', data.token);
         setTokenState(data.token);
         setUser(data.user);
+        setError(null);
         setSuccess('Login successful!');
       }
       setAuthPassword('');
     } catch (err: any) {
+      setSuccess(null);
       setError(err.message || 'Authentication failed');
     } finally {
       setIsLoading(false);
@@ -130,29 +180,41 @@ export default function App() {
           stage: taskStage,
         });
         setTasks(prev => prev.map(t => t.id === updated.id ? updated : t));
+        setError(null);
         setSuccess('Task updated successfully');
       } else {
         const created = await api.createTask(taskTitle, taskDesc, taskStage);
         setTasks(prev => [created, ...prev]);
+        setError(null);
         setSuccess('Task created successfully');
       }
     } catch (err: any) {
+      setSuccess(null);
       setError(err.message || 'Failed to save task');
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleDeleteTask = async (id: string) => {
-    if (!window.confirm('Are you sure you want to delete this task?')) return;
+  const triggerDeleteTask = (id: string) => {
+    setConfirmDeleteId(id);
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!confirmDeleteId) return;
+    const id = confirmDeleteId;
+    setConfirmDeleteId(null);
     setIsLoading(true);
     setError(null);
+    setSuccess(null);
 
     try {
       await api.deleteTask(id);
       setTasks(prev => prev.filter(t => t.id !== id));
+      setError(null);
       setSuccess('Task deleted successfully');
     } catch (err: any) {
+      setSuccess(null);
       setError(err.message || 'Failed to delete task');
     } finally {
       setIsLoading(false);
@@ -160,13 +222,29 @@ export default function App() {
   };
 
   const handleMoveTaskStage = async (id: string, newStage: Stage) => {
+    if (!isOnline) {
+      setError('Cannot move task while offline.');
+      setSuccess(null);
+      return;
+    }
+
+    const originalTasks = [...tasks];
+    const taskToMove = tasks.find(t => t.id === id);
+    if (!taskToMove) return;
+
+    setError(null);
+    setSuccess(null);
+
+    // Optimistic update
+    setTasks(prev => prev.map(t => t.id === id ? { ...t, stage: newStage } : t));
+
     try {
-      // Optimistic update
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, stage: newStage } : t));
       await api.updateTask(id, { stage: newStage });
     } catch (err: any) {
       setError(err.message || 'Failed to update task stage');
-      fetchTasks(); // rollback
+      setSuccess(null);
+      // Rollback to original state immediately
+      setTasks(originalTasks);
     }
   };
 
@@ -288,6 +366,13 @@ export default function App() {
         </div>
       </header>
 
+      {!isOnline && (
+        <div className="offline-banner">
+          <WifiOff size={16} />
+          <span>You are currently offline. Check your network connection.</span>
+        </div>
+      )}
+
       {error && (
         <div className="alert-banner">
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -318,22 +403,40 @@ export default function App() {
             <h2>Task Board</h2>
             <p>Manage your tasks across standard stages by dragging cards or using arrows.</p>
           </div>
-          <button className="btn-add-task" onClick={openAddTaskModal}>
+          <button className="btn-add-task" onClick={openAddTaskModal} disabled={!isOnline}>
             <Plus size={16} />
             <span>Add Task</span>
           </button>
         </div>
 
         {isLoading && tasks.length === 0 ? (
-          <div className="loading-screen">
-            <div className="spinner"></div>
-            <p style={{ color: 'var(--text-muted)' }}>Loading board details...</p>
+          <div className="board-container">
+            {['Todo', 'In Progress', 'Done'].map((label, idx) => (
+              <div key={idx} className={`board-lane ${label.toLowerCase().replace(' ', '')}`}>
+                <div className="lane-header">
+                  <div className="lane-title-group">
+                    <span className="lane-dot"></span>
+                    <h3 className="lane-title">{label}</h3>
+                  </div>
+                  <span className="lane-count">...</span>
+                </div>
+                <div className="lane-cards">
+                  {[1, 2].map((n) => (
+                    <div key={n} className="skeleton-card skeleton-shimmer">
+                      <div className="skeleton-line skeleton-title"></div>
+                      <div className="skeleton-line skeleton-text"></div>
+                      <div className="skeleton-line skeleton-text short"></div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         ) : (
           <KanbanBoard 
             tasks={tasks}
             onEditTask={openEditTaskModal}
-            onDeleteTask={handleDeleteTask}
+            onDeleteTask={triggerDeleteTask}
             onMoveTask={handleMoveTaskStage}
           />
         )}
@@ -400,6 +503,15 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <ConfirmModal
+        isOpen={confirmDeleteId !== null}
+        title="Delete Task"
+        message="Are you sure you want to delete this task? This action cannot be undone."
+        confirmText="Delete"
+        onConfirm={handleConfirmDelete}
+        onCancel={() => setConfirmDeleteId(null)}
+      />
     </div>
   );
 }
